@@ -1,5 +1,5 @@
 import dash
-from dash import dcc, html, Input, Output, callback, dash_table
+from dash import dcc, html, Input, Output, callback, State, dash_table
 import dash_bootstrap_components as dbc
 import plotly.express as px
 import plotly.graph_objects as go
@@ -7,7 +7,16 @@ from datetime import datetime, timedelta
 import pandas as pd
 from typing import List, Dict, Any
 import os
+import logging
 from dt_client import DependencyTrackClient, Project, Vulnerability
+
+# Configure logging
+logging.basicConfig(
+    level=logging.DEBUG,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[logging.StreamHandler()]
+)
+logger = logging.getLogger(__name__)
 
 # Initialize Dash app
 app = dash.Dash(__name__, external_stylesheets=[dbc.themes.BOOTSTRAP])
@@ -15,10 +24,11 @@ app = dash.Dash(__name__, external_stylesheets=[dbc.themes.BOOTSTRAP])
 # Configuration - read from environment variables
 DT_BASE_URL = os.getenv('DT_BASE_URL', 'http://localhost:8080')
 DT_API_KEY = os.getenv('DT_API_KEY', '')
+DT_API_TOKEN = os.getenv('DT_API_TOKEN', '')
 TAG_FILTER = os.getenv('TAG_FILTER', 'cc')
 
 # Initialize Dependency-Track client
-dt_client = DependencyTrackClient(DT_BASE_URL, DT_API_KEY)
+dt_client = DependencyTrackClient(DT_BASE_URL, DT_API_KEY, DT_API_TOKEN)
 
 # App layout
 app.layout = dbc.Container([
@@ -82,26 +92,39 @@ app.layout = dbc.Container([
         ], width=3),
     ], className="mb-4"),
     
-    # Charts section
+    # Charts toggle button
     dbc.Row([
         dbc.Col([
-            dbc.Card([
-                dbc.CardBody([
-                    html.H4("Vulnerability Severity Distribution", className="card-title"),
-                    dcc.Graph(id="severity-chart")
-                ])
-            ])
-        ], width=6),
-        
-        dbc.Col([
-            dbc.Card([
-                dbc.CardBody([
-                    html.H4("License Risk Distribution", className="card-title"),
-                    dcc.Graph(id="license-chart")
-                ])
-            ])
-        ], width=6),
-    ], className="mb-4"),
+            dbc.Button("Show Charts", id="toggle-charts-btn", color="secondary", className="mb-2")
+        ], width=12)
+    ]),
+    
+    # Charts section
+    dbc.Collapse(
+        id="charts-collapse",
+        is_open=False,
+        children=[
+            dbc.Row([
+                dbc.Col([
+                    dbc.Card([
+                        dbc.CardBody([
+                            html.H4("Vulnerability Severity Distribution", className="card-title"),
+                            dcc.Graph(id="severity-chart")
+                        ])
+                    ])
+                ], width=6),
+                
+                dbc.Col([
+                    dbc.Card([
+                        dbc.CardBody([
+                            html.H4("License Risk Distribution", className="card-title"),
+                            dcc.Graph(id="license-chart")
+                        ])
+                    ])
+                ], width=6),
+            ], className="mb-4")
+        ]
+    ),
     
     # Projects table
     dbc.Row([
@@ -109,6 +132,21 @@ app.layout = dbc.Container([
             dbc.Card([
                 dbc.CardBody([
                     html.H4("Projects Overview", className="card-title"),
+                    dbc.Row([
+                        dbc.Col([
+                            dbc.Label("Rows per page", html_for="page-size-select"),
+                            dbc.Select(
+                                id="page-size-select",
+                                options=[
+                                    {"label": "10", "value": 10},
+                                    {"label": "20", "value": 20},
+                                    {"label": "50", "value": 50},
+                                    {"label": "100", "value": 100}
+                                ],
+                                value=20
+                            )
+                        ], width=3)
+                    ], className="mb-3"),
                     html.Div(id="projects-table")
                 ])
             ])
@@ -124,13 +162,25 @@ app.layout = dbc.Container([
         id="interval-component",
         interval=5*60*1000,  # 5 minutes
         n_intervals=0
+    ),
+    
+    # Error toast
+    dbc.Toast(
+        id="error-toast",
+        header="Error",
+        is_open=False,
+        dismissable=True,
+        duration=4000,
+        style={"position": "fixed", "top": 10, "right": 10, "width": 350}
     )
     
 ], fluid=True)
 
 @callback(
     [Output("projects-data", "data"),
-     Output("metrics-data", "data")],
+     Output("metrics-data", "data"),
+     Output("error-toast", "is_open"),
+     Output("error-toast", "children")],
     [Input("refresh-btn", "n_clicks"),
      Input("interval-component", "n_intervals"),
      Input("tag-filter-input", "value")]
@@ -140,22 +190,40 @@ def update_data(n_clicks, n_intervals, tag_filter):
         # Get projects with tag filter
         effective_tag_filter = (tag_filter or TAG_FILTER).strip() or TAG_FILTER
         projects = dt_client.get_projects(effective_tag_filter)
-        
+        logger.info(f"Fetched {len(projects)} projects with tag filter '{effective_tag_filter}'")
         # Get metrics for each project
         all_metrics = []
         for project in projects:
-            metrics = dt_client.get_project_metrics(project.uuid)
-            metrics['project_name'] = project.name
-            metrics['project_version'] = project.version
-            metrics['project_tags'] = project.tags
-            all_metrics.append(metrics)
+            try:
+                metrics = dt_client.get_project_metrics(project.uuid, project.version)
+                metrics['project_name'] = project.name
+                metrics['project_version'] = project.version or ''
+                metrics['project_tags'] = project.tags
+                all_metrics.append(metrics)
+            except Exception as e:
+                logger.warning(f"Failed to get metrics for project {project.name}: {e}")
+                # Add default metrics
+                all_metrics.append({
+                    'total_vulnerabilities': 0,
+                    'new_vulnerabilities_week': 0,
+                    'severity_distribution': {},
+                    'total_licenses': 0,
+                    'license_risk_distribution': {},
+                    'critical_vulns': 0,
+                    'high_vulns': 0,
+                    'medium_vulns': 0,
+                    'low_vulns': 0,
+                    'project_name': project.name,
+                    'project_version': project.version or '',
+                    'project_tags': project.tags
+                })
         
         # Convert to serializable format
         projects_data = [
             {
                 'uuid': p.uuid,
                 'name': p.name,
-                'version': p.version,
+                'version': p.version or '',
                 'description': p.description,
                 'tags': p.tags,
                 'active': p.active,
@@ -164,11 +232,11 @@ def update_data(n_clicks, n_intervals, tag_filter):
             for p in projects
         ]
         
-        return projects_data, all_metrics
+        return projects_data, all_metrics, False, ""
         
     except Exception as e:
-        print(f"Error updating data: {e}")
-        return [], []
+        logger.error(f"Error updating data: {e}")
+        return [], [], True, str(e)
 
 @callback(
     [Output("total-projects", "children"),
@@ -266,11 +334,25 @@ def update_license_chart(metrics_data):
     return fig
 
 @callback(
+    [Output("charts-collapse", "is_open"),
+     Output("toggle-charts-btn", "children")],
+    Input("toggle-charts-btn", "n_clicks"),
+    State("charts-collapse", "is_open")
+)
+def toggle_charts(n_clicks, is_open):
+    if n_clicks:
+        new_open = not is_open
+        button_text = "Hide Charts" if new_open else "Show Charts"
+        return new_open, button_text
+    return is_open, "Show Charts"
+
+@callback(
     Output("projects-table", "children"),
     [Input("projects-data", "data"),
-     Input("metrics-data", "data")]
+     Input("metrics-data", "data"),
+     Input("page-size-select", "value")]
 )
-def update_projects_table(projects_data, metrics_data):
+def update_projects_table(projects_data, metrics_data, page_size):
     if not projects_data or not metrics_data:
         return html.P("No data available")
     
@@ -298,6 +380,7 @@ def update_projects_table(projects_data, metrics_data):
         data=df.to_dict('records'),
         columns=[{'name': col, 'id': col} for col in df.columns],
         style_cell={'textAlign': 'left', 'padding': '10px'},
+        style_table={'overflowX': 'auto'},
         style_data_conditional=[
             {
                 'if': {'filter_query': '{Critical} > 0'},
@@ -310,7 +393,7 @@ def update_projects_table(projects_data, metrics_data):
                 'color': 'black',
             }
         ],
-        page_size=15,
+        page_size=page_size,
         sort_action='native',
         filter_action='native'
     )
