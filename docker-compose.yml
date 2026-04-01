@@ -1,0 +1,50 @@
+services:
+  dtrack-postgres:
+    image: postgres:16-alpine
+    container_name: dtrack-postgres
+    environment:
+      POSTGRES_DB: dtrack
+      POSTGRES_USER: dtrack
+      POSTGRES_PASSWORD: dtrack
+    volumes:
+      - dtrack-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dtrack -d dtrack"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  dependency-track:
+    image: dependencytrack/apiserver:latest
+    container_name: dependency-track
+    depends_on:
+      dtrack-postgres:
+        condition: service_healthy
+    environment:
+      ALPINE_DATABASE_MODE: external
+      ALPINE_DATABASE_URL: jdbc:postgresql://dtrack-postgres:5432/dtrack
+      ALPINE_DATABASE_DRIVER: org.postgresql.Driver
+      ALPINE_DATABASE_USERNAME: dtrack
+      ALPINE_DATABASE_PASSWORD: dtrack
+      
+    ports:
+      - "8080:8080"
+
+  dashboard:
+    image: ghcr.io/astral-sh/uv:python3.11-bookworm-slim
+    container_name: dependency-track-dashboard
+    working_dir: /app
+    depends_on:
+      - dependency-track
+    environment:
+      DT_BASE_URL: http://dependency-track:8080
+      DT_API_KEY: ${DT_API_KEY:-}
+      TAG_FILTER: ${TAG_FILTER:-cc}
+    volumes:
+      - ./:/app
+    command: sh -c "uv sync && uv run python app.py"
+    ports:
+      - "8050:8050"
+
+volumes:
+  dtrack-postgres-data:

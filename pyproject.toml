@@ -1,0 +1,18 @@
+[project]
+name = "dependency-track-dashboard"
+version = "0.1.0"
+description = "Dash dashboard for Dependency-Track project, vulnerability, and license insights"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+  "dash==2.17.0",
+  "dash-bootstrap-components==1.6.0",
+  "requests==2.31.0",
+  "pandas==2.2.0",
+  "plotly==5.19.0",
+  "python-dateutil==2.8.2",
+  "pydantic==2.5.3",
+]
+
+[tool.uv]
+package = false
